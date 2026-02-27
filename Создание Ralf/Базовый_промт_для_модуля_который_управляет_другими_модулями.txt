@@ -1,0 +1,1136 @@
+#1. КОНТЕКСТ 
+Сейчас добавленна структура объекта:
+// TaskStatus представляет допустимые статусы задачи.
+type TaskStatus string
+
+const (
+	StatusNew   TaskStatus = "new"   // задача готова к выполнению
+	StatusRun   TaskStatus = "run"   // задача выполняется
+	StatusError TaskStatus = "error" // при выполнении произошла ошибка
+	StatusOK    TaskStatus = "ok"    // задача успешно выполнена
+)
+
+// Task описывает структуру задачи, прочитанной из файла.
+type Task struct {
+	Num          int        // номер задачи
+	Description  string     // описание задачи
+	ImportantInfo string    // важные моменты
+	ExpectResult string     // ожидаемый результат
+	TestsValue   string     // тестовые данные
+	FuncSignature string    // сигнатура функции (может быть пустой)
+	Status       TaskStatus // текущий статус
+}
+
+и есть перечень задач:
+
+начало задачи:
+номер задачи:1
+описание задачи:Напишите функцию, которая принимает имя пользователя и возвращает приветственное сообщение.
+важные моменты:Имя может быть пустым, в таком случае следует вернуть "Hello, World!".
+ожидаемый результат:Функция должна корректно обрабатывать пустую строку и возвращать строку с приветствием.
+тестовые данные:вход: "Alice" -> выход: "Hello, Alice!"; вход: "" -> выход: "Hello, World!"
+сигнатура функции:func Greeting(name string) string
+статус выполнения:new
+конец задачи.
+
+полученные команды с lm studio мы будем парсить в структуры:
+// CommandType определяет допустимые типы команд от LM Studio.
+type CommandType string
+
+const (
+	CmdCreate      CommandType = "создание"
+	CmdDelete      CommandType = "удаление"
+	CmdEdit        CommandType = "внесение изменений"
+	CmdCopy        CommandType = "копирование"
+	CmdMove        CommandType = "перемещение"
+	CmdRead        CommandType = "чтение"
+	CmdAddLines    CommandType = "добавление строк"
+	CmdDeleteLines CommandType = "удаление строк"
+)
+
+// Command представляет одну атомарную команду для модификации файловой системы.
+type Command struct {
+	Type    CommandType
+	Path    string         // основной путь к файлу
+	Content string         // полный контент файла (для создания)
+	Lines   map[int]string // изменения по номерам строк (для редактирования)
+	SrcPath string         // исходный путь (копирование/перемещение)
+	DstPath string         // целевой путь (копирование/перемещение)
+}
+
+type Message struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type chatRequest struct {
+	Model       string    `json:"model"`
+	Messages    []Message `json:"messages"`
+	Temperature float64   `json:"temperature"`
+	MaxTokens   int       `json:"max_tokens"`
+}
+
+type chatResponse struct {
+	Choices []struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	} `json:"choices"`
+}
+
+логика парсера для данных структур уже написана, её писать не надо.
+
+#2. ЦЕЛЬ 
+Надо сделать модуль который мы запускаем в main и от уже управляет всеми другими модулями.
+#3. ДЕТАЛИ
+При выполнении задачи обязательно учти следующие нюансы:
+1) Модуль должен проверять предварительно доступен ли lm studio.
+2) Есть ли права доступа для работы с файловой системой и командной строкой.
+3) Запуская данный модуль мы должны запустить в цикле чтение файла с задачами (надо указать в конфиге какой файл читаем)
+4) Парсим полученные задачи.
+5) Отправляем запрос в lm studio
+6) Получаем и парсим ответ от lm studio.
+7) Выполняем полученные команды.
+8) Компилируем полученный результат.
+9) Компилируем полученный результат, проверяем ошибки компиляции, если есть то отправляем запрос в lm studio.
+10) После компиляции основного кода пишем тесты для основного кода.
+11) Компилируем тесты, проверяем ошибки компиляции, если есть то отправляем запрос в lm studio.
+12) Если всё хорошо то переходим к другой задача.
+13) Важно. При получении задачи с файла, меняем статус данной задачи в файле задач.
+14) Важно. При изменении статуса задачи, меняем данный статус в файле задач.
+15) Надо добавить в конфиг возможность настройки количество выполенния операций в цикле. К примеру 10 циклов на одну задачу в общем, 10 циклов на компиляцию и решение проблем с компиляцией, 10 циклов на написание кода.
+#4. ФОРМАТ ВЫВОДА 
+Ответ оформи строго по этим требованиям:
+1) Сначала идёт код в Go.
+2) В конце идёт txt файл где описано почему написан именно такой код.
+3) Объём без ограничений.
+
+#5. ПРИМЕРЫ (FEW-SHOT) 
+Примера нет
+
+#6. ОГРАНИЧЕНИЯ 
+В ответе НЕ используй:
+- Воду и общие фразы.
+- Ничего кроме кода Go и комментария в нём и txt файла с описанием почему такой код был выбран ничего больше не должно быть.
+
+#7. УЖЕ РЕАЛИЗОВАННЫЙ КОД
+
+package service
+
+import (
+	"errors"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+)
+
+// Compile выполняет компиляцию Go-кода по указанному пути (файл или директория проекта)
+// после применения атомарных команд Command. Использует go build для выявления
+// максимального количества критических ошибок компиляции (синтаксис, типы,
+// неиспользуемые идентификаторы и т.д.).
+func Compile(path string) (string, error) {
+	// Определяем рабочую директорию
+	dir := filepath.Dir(path)
+	if dir == "." || dir == "" || dir == "/" {
+		dir = path
+	}
+
+	// Кросс-платформенный путь к /dev/null
+	devNull := "/dev/null"
+	if runtime.GOOS == "windows" {
+		devNull = "NUL"
+	}
+
+	// Формируем аргументы: для .go-файла собираем только его,
+	// иначе весь пакет и подпакеты
+	args := []string{"build", "-o", devNull, "./..."}
+	if strings.HasSuffix(strings.ToLower(path), ".go") {
+		args = []string{"build", "-o", devNull, path}
+	}
+
+	cmd := exec.Command("go", args...)
+	cmd.Dir = dir
+
+	// Захватываем весь вывод (stdout + stderr)
+	output, err := cmd.CombinedOutput()
+
+	if err != nil {
+		compileLog := string(output)
+		if compileLog == "" {
+			compileLog = err.Error()
+		}
+		return compileLog, errors.New("Ошибка компиляции.")
+	}
+
+	return "", nil
+}
+
+package service
+
+import (
+	"Ralf/domen"
+	"bufio"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+)
+
+// UpdateTaskStatus изменяет статус задачи с указанным номером в файле.
+// Возвращает nil при успешной замене, иначе ошибку с описанием.
+func UpdateTaskStatus(filePath string, taskNum int, newStatus domen.TaskStatus) error {
+	// 1. Открываем исходный файл для чтения
+	inputFile, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("не удалось открыть файл для чтения: %w", err)
+	}
+	defer inputFile.Close()
+
+	// 2. Создаём временный файл для записи обновлённого содержимого
+	tempFile, err := os.CreateTemp("", "tasks_*.txt")
+	if err != nil {
+		return fmt.Errorf("не удалось создать временный файл: %w", err)
+	}
+	tempFileName := tempFile.Name()
+	defer tempFile.Close()
+
+	scanner := bufio.NewScanner(inputFile)
+	var inTask bool
+	var currentTaskNum int
+	var taskLines []string
+	taskFound := false
+	statusUpdated := false
+
+	// 3. Построчно читаем исходный файл и пишем во временный
+	for scanner.Scan() {
+		line := scanner.Text()
+		trimmedLine := strings.TrimSpace(line)
+
+		// Обнаружено начало задачи
+		if strings.HasPrefix(trimmedLine, "начало задачи:") {
+			inTask = true
+			taskLines = []string{line} // начинаем собирать строки задачи
+			continue
+		}
+
+		// Если мы внутри задачи, добавляем строку в буфер
+		if inTask {
+			taskLines = append(taskLines, line)
+
+			// Пытаемся извлечь номер задачи из текущей строки
+			if strings.Contains(trimmedLine, "номер задачи:") {
+				parts := strings.SplitN(trimmedLine, ":", 2)
+				if len(parts) == 2 {
+					numStr := strings.TrimSpace(parts[1])
+					if num, err := strconv.Atoi(numStr); err == nil {
+						currentTaskNum = num
+					}
+				}
+			}
+
+			// Проверяем конец задачи
+			if strings.HasPrefix(trimmedLine, "конец задачи.") {
+				// Задача завершена, проверяем, нужно ли обновить статус
+				if currentTaskNum == taskNum {
+					taskFound = true
+					// Обновляем строку статуса в собранных строках задачи
+					updatedLines := make([]string, 0, len(taskLines))
+					for _, taskLine := range taskLines {
+						if strings.Contains(taskLine, "статус выполнения:") {
+							// Заменяем старый статус на новый
+							newLine := updateStatusInLine(taskLine, newStatus)
+							updatedLines = append(updatedLines, newLine)
+							statusUpdated = true
+						} else {
+							updatedLines = append(updatedLines, taskLine)
+						}
+					}
+					// Записываем обновлённые строки задачи во временный файл
+					for _, l := range updatedLines {
+						_, err := tempFile.WriteString(l + "\n")
+						if err != nil {
+							return fmt.Errorf("ошибка записи во временный файл: %w", err)
+						}
+					}
+				} else {
+					// Это не наша задача — записываем как есть
+					for _, l := range taskLines {
+						_, err := tempFile.WriteString(l + "\n")
+						if err != nil {
+							return fmt.Errorf("ошибка записи во временный файл: %w", err)
+						}
+					}
+				}
+				// Сбрасываем состояние для следующей задачи
+				inTask = false
+				currentTaskNum = 0
+				taskLines = nil
+				continue
+			}
+		} else {
+			// Строка вне задачи — просто копируем
+			_, err := tempFile.WriteString(line + "\n")
+			if err != nil {
+				return fmt.Errorf("ошибка записи во временный файл: %w", err)
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("ошибка чтения исходного файла: %w", err)
+	}
+
+	// 4. Проверяем, что задача была найдена и статус обновлён
+	if !taskFound {
+		return fmt.Errorf("не получилось поменять статус задачи № %d в файле %s: задача не найдена", taskNum, filePath)
+	}
+	if !statusUpdated {
+		return fmt.Errorf("не получилось поменять статус задачи № %d в файле %s: поле статуса не найдено", taskNum, filePath)
+	}
+
+	// 5. Закрываем файлы перед заменой
+	inputFile.Close()
+	tempFile.Close()
+
+	// 6. Заменяем исходный файл временным
+	if err := os.Rename(tempFileName, filePath); err != nil {
+		return fmt.Errorf("не удалось заменить исходный файл: %w", err)
+	}
+
+	return nil
+}
+
+// updateStatusInLine заменяет старое значение статуса на новое в строке.
+func updateStatusInLine(line string, newStatus domen.TaskStatus) string {
+	parts := strings.SplitN(line, ":", 2)
+	if len(parts) != 2 {
+		return line // неожиданный формат, оставляем как есть
+	}
+	// Оставляем ключ без изменений, подставляем новое значение статуса
+	return fmt.Sprintf("%s:%s", parts[0], string(newStatus))
+}
+
+
+package service
+
+import (
+	"Ralf/domen"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+)
+
+// ExecuteCommand выполняет переданную команду.
+// Возвращает содержимое файла только для CmdRead, иначе пустую строку.
+func ExecuteCommand(cmd domen.Command) (string, error) {
+	switch cmd.Type {
+	case domen.CmdCreate:
+		return "", executeCreate(cmd)
+	case domen.CmdDelete:
+		return "", executeDelete(cmd)
+	case domen.CmdEdit:
+		return "", executeEdit(cmd)
+	case domen.CmdAddLines:
+		return "", executeAddLines(cmd)
+	case domen.CmdDeleteLines:
+		return "", executeDeleteLines(cmd)
+	case domen.CmdCopy:
+		return "", executeCopy(cmd)
+	case domen.CmdMove:
+		return "", executeMove(cmd)
+	case domen.CmdRead:
+		return executeRead(cmd)
+	case domen.CmdCompileCode:
+		return executeCompile(cmd)
+	default:
+		return "", fmt.Errorf("неизвестный тип команды: %s", cmd.Type)
+	}
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return !os.IsNotExist(err)
+}
+
+func readLines(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	content := string(data)
+	lines := strings.Split(content, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines, nil
+}
+
+func writeLines(path string, lines []string) error {
+	content := strings.Join(lines, "\n")
+	if len(lines) > 0 {
+		content += "\n"
+	}
+	return os.WriteFile(path, []byte(content), 0644)
+}
+
+func executeCreate(cmd domen.Command) error {
+	if fileExists(cmd.Path) {
+		return fmt.Errorf("файл уже существует: %s", cmd.Path)
+	}
+	if cmd.Content == "" {
+		return errors.New("пустое содержимое для создания файла")
+	}
+	if dir := filepath.Dir(cmd.Path); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("не удалось создать директорию: %w", err)
+		}
+	}
+	return os.WriteFile(cmd.Path, []byte(cmd.Content), 0644)
+}
+
+func executeDelete(cmd domen.Command) error {
+	if !fileExists(cmd.Path) {
+		return fmt.Errorf("файл не существует: %s", cmd.Path)
+	}
+	return os.Remove(cmd.Path)
+}
+
+func executeEdit(cmd domen.Command) error {
+	if !fileExists(cmd.Path) {
+		return fmt.Errorf("файл не существует: %s", cmd.Path)
+	}
+	if len(cmd.Lines) == 0 {
+		return errors.New("нет строк для изменения")
+	}
+	lines, err := readLines(cmd.Path)
+	if err != nil {
+		return fmt.Errorf("не удалось прочитать файл %s: %w", cmd.Path, err)
+	}
+	for lineNum, newText := range cmd.Lines {
+		if lineNum < 1 || lineNum > len(lines) {
+			return fmt.Errorf("строка %d не существует в файле %s (всего строк: %d)", lineNum, cmd.Path, len(lines))
+		}
+		lines[lineNum-1] = newText
+	}
+	return writeLines(cmd.Path, lines)
+}
+
+func executeAddLines(cmd domen.Command) error {
+	if !fileExists(cmd.Path) {
+		return fmt.Errorf("файл не существует: %s", cmd.Path)
+	}
+	if len(cmd.Lines) == 0 {
+		return errors.New("нет строк для добавления")
+	}
+	lines, err := readLines(cmd.Path)
+	if err != nil {
+		return fmt.Errorf("не удалось прочитать файл %s: %w", cmd.Path, err)
+	}
+	currentLen := len(lines)
+	keys := make([]int, 0, len(cmd.Lines))
+	for k := range cmd.Lines {
+		keys = append(keys, k)
+	}
+	sort.Ints(keys)
+	if keys[0] != currentLen+1 {
+		return fmt.Errorf("нельзя добавить строку %d: файл содержит только %d строк", keys[0], currentLen)
+	}
+	for i := 1; i < len(keys); i++ {
+		if keys[i] != keys[i-1]+1 {
+			return errors.New("строки для добавления должны идти последовательно без пропусков")
+		}
+	}
+	for _, k := range keys {
+		lines = append(lines, cmd.Lines[k])
+	}
+	return writeLines(cmd.Path, lines)
+}
+
+func executeDeleteLines(cmd domen.Command) error {
+	if !fileExists(cmd.Path) {
+		return fmt.Errorf("файл не существует: %s", cmd.Path)
+	}
+	if len(cmd.Lines) == 0 {
+		return errors.New("нет строк для удаления")
+	}
+	lines, err := readLines(cmd.Path)
+	if err != nil {
+		return fmt.Errorf("не удалось прочитать файл %s: %w", cmd.Path, err)
+	}
+	keys := make([]int, 0, len(cmd.Lines))
+	for k := range cmd.Lines {
+		keys = append(keys, k)
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(keys))) // удаляем с большей строки к меньшей
+	for _, k := range keys {
+		if k < 1 || k > len(lines) {
+			return fmt.Errorf("строка %d не существует в файле %s (всего строк: %d)", k, cmd.Path, len(lines))
+		}
+		idx := k - 1
+		lines = append(lines[:idx], lines[idx+1:]...)
+	}
+	return writeLines(cmd.Path, lines)
+}
+
+func executeCopy(cmd domen.Command) error {
+	if cmd.SrcPath == "" || cmd.DstPath == "" {
+		return errors.New("не указаны пути для копирования")
+	}
+	if !fileExists(cmd.SrcPath) {
+		return fmt.Errorf("исходный файл не существует: %s", cmd.SrcPath)
+	}
+	if fileExists(cmd.DstPath) {
+		return fmt.Errorf("целевой файл уже существует: %s", cmd.DstPath)
+	}
+	if dir := filepath.Dir(cmd.DstPath); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("не удалось создать директорию: %w", err)
+		}
+	}
+	data, err := os.ReadFile(cmd.SrcPath)
+	if err != nil {
+		return fmt.Errorf("не удалось прочитать исходный файл: %w", err)
+	}
+	return os.WriteFile(cmd.DstPath, data, 0644)
+}
+
+func executeMove(cmd domen.Command) error {
+	if cmd.SrcPath == "" || cmd.DstPath == "" {
+		return errors.New("не указаны пути для перемещения")
+	}
+	if !fileExists(cmd.SrcPath) {
+		return fmt.Errorf("исходный файл не существует: %s", cmd.SrcPath)
+	}
+	if fileExists(cmd.DstPath) {
+		return fmt.Errorf("целевой файл уже существует: %s", cmd.DstPath)
+	}
+	if dir := filepath.Dir(cmd.DstPath); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("не удалось создать директорию: %w", err)
+		}
+	}
+	return os.Rename(cmd.SrcPath, cmd.DstPath)
+}
+
+func executeRead(cmd domen.Command) (string, error) {
+	if !fileExists(cmd.Path) {
+		return "", fmt.Errorf("файл не существует: %s", cmd.Path)
+	}
+	data, err := os.ReadFile(cmd.Path)
+	if err != nil {
+		return "", fmt.Errorf("не удалось прочитать файл %s: %w", cmd.Path, err)
+	}
+	return string(data), nil
+}
+
+func executeCompile(cmd domen.Command) (string, error) {
+	if !fileExists(cmd.Path) {
+		return "", fmt.Errorf("файл не существует: %s", cmd.Path)
+	}
+	return Compile(cmd.Path)
+}
+
+
+package service
+
+import (
+	"Ralf/domen"
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+)
+
+const (
+	lmStudioURL = "http://localhost:1234/v1/chat/completions"
+	modelName   = "local-model"
+)
+
+// buildSystemPrompt формирует предварительный системный промпт, строго определяющий
+// формат ответа LM Studio для совместимости с ParseCommands.
+func buildSystemPrompt() string {
+	return `Ты — эксперт-программист Go. Решаешь задачи и возвращаешь ТОЛЬКО команды в строгом формате.
+
+Используй блоки:
+
+Начало команды:
+тип: создание
+адрес: /path/to/file.go
+содержимое:
+...полный код...
+Конец команды.
+
+Или для редактирования:
+тип: внесение изменений
+адрес: /path/to/file.go
+строки: {5:"новый код", 12:"другой код"}
+Конец команды.
+
+Для компиляции:
+тип: компиляция
+адрес: /path/to/main.go
+Конец команды.
+
+Никакого текста вне этих блоков. Только команды.`
+}
+
+// taskToPrompt формирует пользовательский промпт из структуры Task.
+func taskToPrompt(task domen.Task) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Задача №%d\n", task.Num))
+	sb.WriteString(fmt.Sprintf("Описание: %s\n", task.Description))
+	sb.WriteString(fmt.Sprintf("Важные моменты: %s\n", task.ImportantInfo))
+	sb.WriteString(fmt.Sprintf("Ожидаемый результат: %s\n", task.ExpectResult))
+	sb.WriteString(fmt.Sprintf("Тесты: %s\n", task.TestsValue))
+	if task.FuncSignature != "" {
+		sb.WriteString(fmt.Sprintf("Сигнатура: %s\n", task.FuncSignature))
+	}
+	return sb.String()
+}
+
+// SendTaskToLMStudio отправляет структуру Task в LM Studio через REST API.
+// Предварительно применяется system prompt с требованием строгого шаблона ответа.
+func SendTaskToLMStudio(task domen.Task) (string, error) {
+	messages := []Message{
+		{Role: "system", Content: buildSystemPrompt()},
+		{Role: "user", Content: taskToPrompt(task)},
+	}
+	return sendToLMStudio(messages)
+}
+
+// SendCompilationError отправляет лог ошибки компиляции в LM Studio.
+// LM Studio возвращает список исправляющих команд в требуемом формате.
+func SendCompilationError(path, compileLog string) (string, error) {
+	prompt := fmt.Sprintf("Файл %s не компилируется. Лог ошибки:\n\n%s\n\nИсправь код. Верни только команды для исправления.", path, compileLog)
+	messages := []Message{
+		{Role: "system", Content: buildSystemPrompt()},
+		{Role: "user", Content: prompt},
+	}
+	return sendToLMStudio(messages)
+}
+
+type Message struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type chatRequest struct {
+	Model       string    `json:"model"`
+	Messages    []Message `json:"messages"`
+	Temperature float64   `json:"temperature"`
+	MaxTokens   int       `json:"max_tokens"`
+}
+
+type chatResponse struct {
+	Choices []struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	} `json:"choices"`
+}
+
+// sendToLMStudio выполняет HTTP-запрос к OpenAI-совместимому endpoint LM Studio.
+func sendToLMStudio(messages []Message) (string, error) {
+	reqBody := chatRequest{
+		Model:       modelName,
+		Messages:    messages,
+		Temperature: 0.1,
+		MaxTokens:   4096,
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("ошибка создания JSON: %w", err)
+	}
+
+	resp, err := http.Post(lmStudioURL, "application/json", bytes.NewReader(jsonData))
+	if err != nil {
+		return "", fmt.Errorf("не удалось подключиться к LM Studio: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("ошибка чтения ответа: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("LM Studio: статус %d, тело: %s", resp.StatusCode, string(body))
+	}
+
+	var result chatResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("ошибка разбора ответа: %w", err)
+	}
+
+	if len(result.Choices) == 0 {
+		return "", errors.New("пустой ответ от LM Studio")
+	}
+
+	return result.Choices[0].Message.Content, nil
+}
+
+package service
+
+import (
+	"Ralf/domen"
+	"bufio"
+	"errors"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+)
+
+// GetNewTask читает файл задач и возвращает первую задачу со статусом new.
+// Если задача не найдена или произошла ошибка ввода-вывода, возвращается соответствующая ошибка.
+func GetNewTask(path string) (domen.Task, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return domen.Task{}, fmt.Errorf("не удалось открыть файл задач: %w", err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	var tasks []domen.Task
+	var currentTask map[string]string
+	inTask := false
+
+	// Построчный разбор файла
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		// Обнаружено начало новой задачи
+		if strings.HasPrefix(line, "начало задачи:") {
+			inTask = true
+			currentTask = make(map[string]string)
+			continue
+		}
+
+		// Обнаружен конец задачи
+		if strings.HasPrefix(line, "конец задачи.") && inTask {
+			inTask = false
+			task, err := parseTaskFromMap(currentTask)
+			if err != nil {
+				// При ошибке парсинга одной задачи прерываем выполнение,
+				// так как файл может быть повреждён.
+				return domen.Task{}, fmt.Errorf("ошибка парсинга задачи: %w", err)
+			}
+			tasks = append(tasks, task)
+			continue
+		}
+
+		// Если мы внутри задачи, обрабатываем строку с ключом и значением
+		if inTask {
+			// Разделяем по первому двоеточию, чтобы отделить ключ от значения
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) != 2 {
+				// Строка не содержит двоеточия — игнорируем (возможно, часть предыдущего значения)
+				continue
+			}
+			key := strings.TrimSpace(parts[0])
+			value := strings.TrimSpace(parts[1])
+			currentTask[key] = value
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return domen.Task{}, fmt.Errorf("ошибка чтения файла: %w", err)
+	}
+
+	// Поиск первой задачи со статусом new
+	for _, task := range tasks {
+		if task.Status == domen.StatusNew {
+			return task, nil
+		}
+	}
+
+	return domen.Task{}, errors.New("не найдено задач со статусом new")
+}
+
+// parseTaskFromMap преобразует набор пар «ключ-значение» в структуру Task.
+// Ключи соответствуют русскоязычным заголовкам из файла.
+func parseTaskFromMap(data map[string]string) (domen.Task, error) {
+	var task domen.Task
+	//var err error
+
+	for key, value := range data {
+		switch key {
+		case "номер задачи":
+			num, convErr := strconv.Atoi(value)
+			if convErr != nil {
+				return domen.Task{}, fmt.Errorf("неверный формат номера задачи: %w", convErr)
+			}
+			task.Num = num
+		case "описание задачи":
+			task.Description = value
+		case "важные моменты":
+			task.ImportantInfo = value
+		case "ожидаемый результат":
+			task.ExpectResult = value
+		case "тестовые данные":
+			task.TestsValue = value
+		case "сигнатура функции":
+			task.FuncSignature = value
+		case "статус выполнения":
+			task.Status = domen.TaskStatus(value)
+		default:
+			// Неизвестные ключи игнорируются, что позволяет расширять формат без поломки парсера
+		}
+	}
+
+	// Проверка наличия обязательных полей не производится,
+	// так как в задании не указаны обязательные требования.
+	// При необходимости можно добавить проверку, например, на Num==0 и возвращать ошибку.
+	return task, nil
+}
+
+
+package service
+
+import (
+	"Ralf/domen"
+	"errors"
+	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
+)
+
+// ParseCommands выполняет полный парсинг ответа от LM Studio в слайс команд.
+func ParseCommands(response string) ([]domen.Command, error) {
+	var commands []domen.Command
+
+	blockRe := regexp.MustCompile(`(?s)Начало команды:(.*?)Конец команды\.`)
+	matches := blockRe.FindAllStringSubmatch(response, -1)
+
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		block := strings.TrimSpace(match[1])
+
+		cmd, err := parseSingleCommandBlock(block)
+		if err != nil {
+			return nil, fmt.Errorf("ошибка парсинга блока: %w", err)
+		}
+		commands = append(commands, cmd)
+	}
+
+	if len(commands) == 0 {
+		return nil, errors.New("в ответе LM Studio не обнаружено ни одного блока команды")
+	}
+
+	return commands, nil
+}
+
+// parseSingleCommandBlock парсит один блок "Начало команды: ...".
+func parseSingleCommandBlock(block string) (domen.Command, error) {
+	cmd := domen.Command{
+		Lines: make(map[int]string),
+	}
+
+	// Тип команды
+	if m := regexp.MustCompile(`тип:\s*([^\n]+)`).FindStringSubmatch(block); len(m) > 1 {
+		typStr := strings.TrimSpace(m[1])
+		if t, ok := mapRussianType(typStr); ok {
+			cmd.Type = t
+		} else {
+			cmd.Type = domen.CommandType(typStr)
+		}
+	} else {
+		return cmd, errors.New("тип команды не найден")
+	}
+
+	// Основной путь
+	if m := regexp.MustCompile(`адрес:\s*([^\n]+)`).FindStringSubmatch(block); len(m) > 1 {
+		cmd.Path = strings.TrimSpace(m[1])
+	}
+
+	// Исходный и целевой пути
+	if m := regexp.MustCompile(`исходный_адрес:\s*([^\n]+)`).FindStringSubmatch(block); len(m) > 1 {
+		cmd.SrcPath = strings.TrimSpace(m[1])
+	}
+	if m := regexp.MustCompile(`целевой_адрес:\s*([^\n]+)`).FindStringSubmatch(block); len(m) > 1 {
+		cmd.DstPath = strings.TrimSpace(m[1])
+	}
+
+	// Содержимое файла (создание)
+	if cmd.Type == domen.CmdCreate {
+		re := regexp.MustCompile(`(?s)содержимое:\s*[\w]*\n(.*?)\n`)
+		if m := re.FindStringSubmatch(block); len(m) > 1 {
+			cmd.Content = strings.TrimSpace(m[1])
+		}
+	}
+
+	// Строки для редактирования или добавления новых строк
+	if cmd.Type == domen.CmdEdit || cmd.Type == domen.CmdAddLines {
+		re := regexp.MustCompile(`(?s)строки:\s*\{(.*?)\}`)
+		if m := re.FindStringSubmatch(block); len(m) > 1 {
+			cmd.Lines = parseLinesMap(m[1])
+		}
+	}
+
+	return cmd, nil
+}
+
+// mapRussianType преобразует русское название типа в CommandType.
+func mapRussianType(typStr string) (domen.CommandType, bool) {
+	switch typStr {
+	case "создание":
+		return domen.CmdCreate, true
+	case "удаление":
+		return domen.CmdDelete, true
+	case "внесение изменений":
+		return domen.CmdEdit, true
+	case "добавление строк":
+		return domen.CmdAddLines, true
+	case "копирование":
+		return domen.CmdCopy, true
+	case "перемещение":
+		return domen.CmdMove, true
+	case "чтение":
+		return domen.CmdRead, true
+	case "компиляция":
+		return domen.CmdCompileCode, true
+	}
+	return "", false
+}
+
+// parseLinesMap парсит содержимое {10:"text", 20:"text2"} в map.
+func parseLinesMap(s string) map[int]string {
+	m := make(map[int]string)
+	parts := strings.Split(s, ",")
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if idx := strings.Index(p, ":"); idx != -1 {
+			keyStr := strings.TrimSpace(p[:idx])
+			value := strings.Trim(strings.TrimSpace(p[idx+1:]), `"`)
+			if num, err := strconv.Atoi(keyStr); err == nil {
+				m[num] = value
+			}
+		}
+	}
+	return m
+}
+
+
+package service
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"time"
+
+	"Ralf/domen"
+)
+
+const StrictCommandTemplate = `Ты — эксперт-программист Go с 5-летним опытом.
+Твоя ЕДИНСТВЕННАЯ задача — выполнять полученную задачу ИСКЛЮЧИТЕЛЬНО через блоки команд.
+
+ПРАВИЛО №1: Ты НЕ ИМЕЕШЬ ПРАВА выводить НИЧЕГО кроме блоков команд.
+Запрещено: любой текст до первого блока, объяснения, "Вот решение", markdown, комментарии, вступления, заключения.
+
+ПРАВИЛО №2: Каждый ответ состоит ТОЛЬКО из одного или нескольких блоков в ТОЧНОМ формате:
+
+Начало команды:
+тип: [один из разрешённых типов]
+адрес: /полный/путь/к/файлу.go
+
+[дополнительные поля в зависимости от типа]
+Конец команды.
+
+РАЗРЕШЁННЫЕ ТИПЫ И ИХ ТОЧНЫЙ ФОРМАТ:
+
+1. создание
+Начало команды:
+тип: создание
+адрес: /internal/greeting.go
+содержимое:
+package internal
+
+func Greeting(name string) string {
+    if name == "" {
+        return "Hello, World!"
+    }
+    return "Hello, " + name + "!"
+}
+Конец команды.
+
+2. внесение изменений
+Начало команды:
+тип: внесение изменений
+адрес: /main.go
+строки:
+{
+1:"package main",
+10:"    fmt.Println(Greeting(\"Alice\"))",
+}
+Конец команды.
+
+3. добавление строк
+Начало команды:
+тип: добавление строк
+адрес: /main.go
+строки:
+{
+15:"func main() {",
+16:"    fmt.Println(\"Done\")",
+17:"}",
+}
+Конец команды.
+
+4. удаление строк
+Начало команды:
+тип: удаление строк
+адрес: /old.go
+строки:
+{
+5:"",
+8:"",
+}
+Конец команды.
+
+5. удаление
+Начало команды:
+тип: удаление
+адрес: /obsolete.go
+Конец команды.
+
+6. копирование
+Начало команды:
+тип: копирование
+адрес: /new/path.go
+исходный_адрес: /old/path.go
+целевой_адрес: /new/path.go
+Конец команды.
+
+7. перемещение
+Начало команды:
+тип: перемещение
+адрес: /new/path.go
+исходный_адрес: /old/path.go
+целевой_адрес: /new/path.go
+Конец команды.
+
+8. чтение
+Начало команды:
+тип: чтение
+адрес: /file.go
+Конец команды.
+
+ПРАВИЛО №3: Если нужно выполнить несколько действий — выводи несколько блоков подряд без разделителей.
+ПРАВИЛО №4: Начинай ответ сразу с "Начало команды:" и заканчивай каждый блок "Конец команды.".
+ПРАВИЛО №5: Никогда не нарушай этот формат ни при каких обстоятельствах.
+
+Выполни следующую задачу строго по этому шаблону.`
+
+// LLMClient управляет взаимодействием с LM Studio через OpenAI-compatible API.
+type LLMClient struct {
+	BaseURL    string
+	Model      string
+	HTTPClient *http.Client
+}
+
+// NewLLMClient возвращает настроенный клиент для LM Studio.
+func NewLLMClient() *LLMClient {
+	return &LLMClient{
+		BaseURL: "http://localhost:1234/v1",
+		Model:   "local-model",
+		HTTPClient: &http.Client{
+			Timeout: 300 * time.Second,
+		},
+	}
+}
+
+// SendTaskToLLM отправляет структуру Task в LM Studio и возвращает список parsed команд.
+func SendTaskToLLM(task domen.Task) ([]domen.Command, error) {
+	client := NewLLMClient()
+	return client.sendTask(task)
+}
+
+func (c *LLMClient) sendTask(task domen.Task) ([]domen.Command, error) {
+	userPrompt := fmt.Sprintf(`Задача №%d
+
+Описание задачи: %s
+Важные моменты: %s
+Ожидаемый результат: %s
+Тестовые данные: %s
+Сигнатура функции: %s
+
+Реализуй задачу строго по шаблону выше.`,
+		task.Num,
+		task.Description,
+		task.ImportantInfo,
+		task.ExpectResult,
+		task.TestsValue,
+		task.FuncSignature)
+
+	reqBody := map[string]any{
+		"model": c.Model,
+		"messages": []map[string]string{
+			{"role": "system", "content": StrictCommandTemplate},
+			{"role": "user", "content": userPrompt},
+		},
+		"temperature": 0.0,
+		"top_p":       1.0,
+		"max_tokens":  16384,
+		"stream":      false,
+		"stop":        []string{"Конец команды."},
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("не удалось маршалировать запрос: %w", err)
+	}
+
+	resp, err := c.HTTPClient.Post(c.BaseURL+"/chat/completions", "application/json", bytes.NewReader(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("ошибка соединения с LM Studio: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("LM Studio вернул код %d: %s", resp.StatusCode, string(body))
+	}
+
+	var apiResp struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return nil, fmt.Errorf("ошибка парсинга JSON ответа: %w", err)
+	}
+
+	if len(apiResp.Choices) == 0 || apiResp.Choices[0].Message.Content == "" {
+		return nil, errors.New("LM Studio вернул пустой ответ")
+	}
+
+	llmOutput := apiResp.Choices[0].Message.Content
+
+	commands, err := ParseCommands(llmOutput)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка парсинга команд LLM: %w", err)
+	}
+
+	return commands, nil
+}

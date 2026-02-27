@@ -71,9 +71,62 @@ type Command struct {
 
 логика парсера для данных структур уже написана, её писать не надо.
 
+готовый код для проверки компиляции кода:
+package service
+
+import (
+	"errors"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+)
+
+// Compile выполняет компиляцию Go-кода по указанному пути (файл или директория проекта)
+// после применения атомарных команд Command. Использует go build для выявления
+// максимального количества критических ошибок компиляции (синтаксис, типы,
+// неиспользуемые идентификаторы и т.д.).
+func Compile(path string) (string, error) {
+	// Определяем рабочую директорию
+	dir := filepath.Dir(path)
+	if dir == "." || dir == "" || dir == "/" {
+		dir = path
+	}
+
+	// Кросс-платформенный путь к /dev/null
+	devNull := "/dev/null"
+	if runtime.GOOS == "windows" {
+		devNull = "NUL"
+	}
+
+	// Формируем аргументы: для .go-файла собираем только его,
+	// иначе весь пакет и подпакеты
+	args := []string{"build", "-o", devNull, "./..."}
+	if strings.HasSuffix(strings.ToLower(path), ".go") {
+		args = []string{"build", "-o", devNull, path}
+	}
+
+	cmd := exec.Command("go", args...)
+	cmd.Dir = dir
+
+	// Захватываем весь вывод (stdout + stderr)
+	output, err := cmd.CombinedOutput()
+
+	if err != nil {
+		compileLog := string(output)
+		if compileLog == "" {
+			compileLog = err.Error()
+		}
+		return compileLog, errors.New("Ошибка компиляции.")
+	}
+
+	return "", nil
+}
+
 
 #2. ЦЕЛЬ 
-Создать функцию которая отправляет полученную структуру task в lm studio по rest api. И ожидает получения ответа по таску
+Создать функцию которая отправляет полученную структуру task в lm studio по rest api. И ожидает получения ответа по таску.
+Так же надо добавить метод который отправляет простой запрос в lm studio который не относится к task а к примеру я хочу отправить ошибку которая вышла во время компиляции готового кода и мы ожидаем так же что lm studio пришлёт список команд для решения данной проблемы.
 #3. ДЕТАЛИ 
 При выполнении задачи обязательно учти следующие нюансы:
 1) Отправляем предварительный промт в lm studio где указываем что ответ должен быть определённый шаблон.
@@ -94,7 +147,6 @@ type Command struct {
 - Ничего кроме кода Go и комментария в нём и txt файла с описанием почему такой код был выбран ничего больше не должно быть.
 
 #7. КОД ПАРСЕРА ОТВЕТА С LM STUDIO
-
 package service
 
 import (
@@ -200,6 +252,8 @@ func mapRussianType(typStr string) (domen.CommandType, bool) {
 		return domen.CmdMove, true
 	case "чтение":
 		return domen.CmdRead, true
+	case "компиляция":
+		return domen.CmdCompileCode, true
 	}
 	return "", false
 }
