@@ -1,0 +1,222 @@
+#1. КОНТЕКСТ 
+Сейчас добавленна структура объекта:
+// TaskStatus представляет допустимые статусы задачи.
+type TaskStatus string
+
+const (
+	StatusNew   TaskStatus = "new"   // задача готова к выполнению
+	StatusRun   TaskStatus = "run"   // задача выполняется
+	StatusError TaskStatus = "error" // при выполнении произошла ошибка
+	StatusOK    TaskStatus = "ok"    // задача успешно выполнена
+)
+
+// Task описывает структуру задачи, прочитанной из файла.
+type Task struct {
+	Num          int        // номер задачи
+	Description  string     // описание задачи
+	ImportantInfo string    // важные моменты
+	ExpectResult string     // ожидаемый результат
+	TestsValue   string     // тестовые данные
+	FuncSignature string    // сигнатура функции (может быть пустой)
+	Status       TaskStatus // текущий статус
+}
+
+и есть перечень задач:
+
+начало задачи:
+номер задачи:1
+описание задачи:Напишите функцию, которая принимает имя пользователя и возвращает приветственное сообщение.
+важные моменты:Имя может быть пустым, в таком случае следует вернуть "Hello, World!".
+ожидаемый результат:Функция должна корректно обрабатывать пустую строку и возвращать строку с приветствием.
+тестовые данные:вход: "Alice" -> выход: "Hello, Alice!"; вход: "" -> выход: "Hello, World!"
+сигнатура функции:func Greeting(name string) string
+статус выполнения:new
+конец задачи.
+
+начало задачи:
+номер задачи:2
+описание задачи:Реализуйте функцию, которая принимает два целых числа и возвращает их сумму.
+важные моменты:Учесть возможное переполнение? Для простоты считаем, что числа в пределах int.
+ожидаемый результат:Возврат суммы двух чисел.
+тестовые данные:вход: 3, 5 -> выход: 8; вход: -2, 7 -> выход: 5
+сигнатура функции:func Add(a, b int) int
+статус выполнения:new
+конец задачи.
+
+
+полученные команды с lm studio мы будем парсить в структуры:
+// CommandType определяет допустимые типы команд от LM Studio.
+type CommandType string
+
+const (
+	CmdCreate      CommandType = "создание"
+	CmdDelete      CommandType = "удаление"
+	CmdEdit        CommandType = "внесение изменений"
+	CmdCopy        CommandType = "копирование"
+	CmdMove        CommandType = "перемещение"
+	CmdRead        CommandType = "чтение"
+	CmdAddLines    CommandType = "добавление строк"
+	CmdDeleteLines CommandType = "удаление строк"
+)
+
+// Command представляет одну атомарную команду для модификации файловой системы.
+type Command struct {
+	Type    CommandType
+	Path    string         // основной путь к файлу
+	Content string         // полный контент файла (для создания)
+	Lines   map[int]string // изменения по номерам строк (для редактирования)
+	SrcPath string         // исходный путь (копирование/перемещение)
+	DstPath string         // целевой путь (копирование/перемещение)
+}
+
+логика парсера для данных структур уже написана, её писать не надо.
+
+
+#2. ЦЕЛЬ 
+Создать функцию которая отправляет полученную структуру task в lm studio по rest api. И ожидает получения ответа по таску
+#3. ДЕТАЛИ 
+При выполнении задачи обязательно учти следующие нюансы:
+1) Отправляем предварительный промт в lm studio где указываем что ответ должен быть определённый шаблон.
+2) Отправляем распарсеную структуру таска в lm studio.
+3) Указываем lm studio что ответ должен строго совпадать шаблону.
+#4. ФОРМАТ ВЫВОДА 
+Ответ оформи строго по этим требованиям:
+1) Сначала идёт код в Go.
+2) В конце идёт txt файл где описано почему написан именно такой код.
+3) Объём без ограничений.
+
+#5. ПРИМЕРЫ (FEW-SHOT) 
+Примера нет
+
+#6. ОГРАНИЧЕНИЯ 
+В ответе НЕ используй:
+- Воду и общие фразы.
+- Ничего кроме кода Go и комментария в нём и txt файла с описанием почему такой код был выбран ничего больше не должно быть.
+
+#7. КОД ПАРСЕРА ОТВЕТА С LM STUDIO
+
+package service
+
+import (
+	"Ralf/domen"
+	"errors"
+	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
+)
+
+// ParseCommands выполняет полный парсинг ответа от LM Studio в слайс команд.
+func ParseCommands(response string) ([]domen.Command, error) {
+	var commands []domen.Command
+
+	blockRe := regexp.MustCompile(`(?s)Начало команды:(.*?)Конец команды\.`)
+	matches := blockRe.FindAllStringSubmatch(response, -1)
+
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		block := strings.TrimSpace(match[1])
+
+		cmd, err := parseSingleCommandBlock(block)
+		if err != nil {
+			return nil, fmt.Errorf("ошибка парсинга блока: %w", err)
+		}
+		commands = append(commands, cmd)
+	}
+
+	if len(commands) == 0 {
+		return nil, errors.New("в ответе LM Studio не обнаружено ни одного блока команды")
+	}
+
+	return commands, nil
+}
+
+// parseSingleCommandBlock парсит один блок "Начало команды: ...".
+func parseSingleCommandBlock(block string) (domen.Command, error) {
+	cmd := domen.Command{
+		Lines: make(map[int]string),
+	}
+
+	// Тип команды
+	if m := regexp.MustCompile(`тип:\s*([^\n]+)`).FindStringSubmatch(block); len(m) > 1 {
+		typStr := strings.TrimSpace(m[1])
+		if t, ok := mapRussianType(typStr); ok {
+			cmd.Type = t
+		} else {
+			cmd.Type = domen.CommandType(typStr)
+		}
+	} else {
+		return cmd, errors.New("тип команды не найден")
+	}
+
+	// Основной путь
+	if m := regexp.MustCompile(`адрес:\s*([^\n]+)`).FindStringSubmatch(block); len(m) > 1 {
+		cmd.Path = strings.TrimSpace(m[1])
+	}
+
+	// Исходный и целевой пути
+	if m := regexp.MustCompile(`исходный_адрес:\s*([^\n]+)`).FindStringSubmatch(block); len(m) > 1 {
+		cmd.SrcPath = strings.TrimSpace(m[1])
+	}
+	if m := regexp.MustCompile(`целевой_адрес:\s*([^\n]+)`).FindStringSubmatch(block); len(m) > 1 {
+		cmd.DstPath = strings.TrimSpace(m[1])
+	}
+
+	// Содержимое файла (создание)
+	if cmd.Type == domen.CmdCreate {
+		re := regexp.MustCompile(`(?s)содержимое:\s*[\w]*\n(.*?)\n`)
+		if m := re.FindStringSubmatch(block); len(m) > 1 {
+			cmd.Content = strings.TrimSpace(m[1])
+		}
+	}
+
+	// Строки для редактирования или добавления новых строк
+	if cmd.Type == domen.CmdEdit || cmd.Type == domen.CmdAddLines {
+		re := regexp.MustCompile(`(?s)строки:\s*\{(.*?)\}`)
+		if m := re.FindStringSubmatch(block); len(m) > 1 {
+			cmd.Lines = parseLinesMap(m[1])
+		}
+	}
+
+	return cmd, nil
+}
+
+// mapRussianType преобразует русское название типа в CommandType.
+func mapRussianType(typStr string) (domen.CommandType, bool) {
+	switch typStr {
+	case "создание":
+		return domen.CmdCreate, true
+	case "удаление":
+		return domen.CmdDelete, true
+	case "внесение изменений":
+		return domen.CmdEdit, true
+	case "добавление строк":
+		return domen.CmdAddLines, true
+	case "копирование":
+		return domen.CmdCopy, true
+	case "перемещение":
+		return domen.CmdMove, true
+	case "чтение":
+		return domen.CmdRead, true
+	}
+	return "", false
+}
+
+// parseLinesMap парсит содержимое {10:"text", 20:"text2"} в map.
+func parseLinesMap(s string) map[int]string {
+	m := make(map[int]string)
+	parts := strings.Split(s, ",")
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if idx := strings.Index(p, ":"); idx != -1 {
+			keyStr := strings.TrimSpace(p[:idx])
+			value := strings.Trim(strings.TrimSpace(p[idx+1:]), `"`)
+			if num, err := strconv.Atoi(keyStr); err == nil {
+				m[num] = value
+			}
+		}
+	}
+	return m
+}
