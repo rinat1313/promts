@@ -6,7 +6,7 @@ type TaskStatus string
 const (
 	StatusNew   TaskStatus = "new"   // задача готова к выполнению
 	StatusRun   TaskStatus = "run"   // задача выполняется
-	StatusError TaskStatus = "error" // при выполнении произошла ошибка
+	StatusError TaskStatus = "new" // при выполнении произошла ошибка
 	StatusOK    TaskStatus = "ok"    // задача успешно выполнена
 )
 
