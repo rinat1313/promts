@@ -1,0 +1,53 @@
+#1. CONTEXT
+Nothing has been implemented yet.
+#2. THE GOAL
+Implement a microservice (assistant) that is used to create a task list for other assistants.
+He must have pens.:
+1) Accept the task file, in json format.
+2) Get information about the current work task.
+3) Get a list of all the tasks in the queue.
+4) Get a list of all the tasks that are done.
+5) Get the log of the current task.
+6) Get the log of the selected task.
+7) Get the start page index.html .
+8) Add one task, accepts json with the task body.
+9) Delete the task.
+10) Stop the task.
+11) Run the task.
+12) Add an assistant.
+13) Delete the assistant.
+14) Stop the assistant.
+He should have a list of assistants.
+The microservice receives a request or task that describes the functionality or function or application with a detailed description of the functionality.
+And the microservice analyzes this task and creates a list of tasks that assistants can pick up.
+#3. DETAILS
+An assistant is an AI agent who interacts with llm and solves the task assigned to him.
+The structure of the decomposed tasks:
+{
+"id_task": *,
+  "description": "Task description goes here",
+  "notes": "Important points go here",
+  "expected_output": "Expected results go here",
+  "test_cases": "Test data and execution results are listed here",
+  "func_signature": "Example function signature is specified here, this parameter may be empty",
+  "status": "new"
+}
+"status" can be "new", "error", "run", "ok".
+#4. OUTPUT FORMAT
+Form the answer strictly according to these requirements:
+1) First comes the code in Go.
+2) At the end there is a txt file that describes why this particular code was written.
+3) Unlimited volume.
+#5. EXAMPLES (FEW-SHOT)
+I need an answer similar to this example.:
+Input: Write a code in Go that should return the text "Hello world!".
+Exit:
+package main
+import "fmt"
+func main() {
+    fmt.Println("Hello world!")
+}
+#6. RESTRICTIONS
+In the answer, DON'T use:
+- Water and general phrases.
+- Nothing but the Go code and a comment in it and a txt file describing why such a code was selected, there should be nothing else.
