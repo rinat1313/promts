@@ -1,0 +1,31 @@
+#1. CONTEXT
+The tasks have not been developed yet.
+#2. THE GOAL
+We need to develop a telegram bot.
+The telegram bot should write messages to the user.
+Without connecting to a DBMS. All data should be stored in a json file for now.
+Make a separate "database connection" module so that we can quickly change it in the config so that instead of a json file we can use
+a DBMS, for example postgres. No implementation for working with postgres yet.
+The application was divided into different code blocks.
+The classic structure in Go programming should be used, these are domen, internal, app, and so on.
+Don't use links to githab.
+The telegram bot must run in a docker container.
+Make him a couple of handles, for example / end with the GET method, which, when accessing this "handle", starts the service,
+after which the bot sends the user a message that the tasks are completed.
+Make a separate configuration module where we set the configuration of the telegram bot, the rest api. Use
+the yaml format for the settings.
+#3. DETAILS
+When completing the task, be sure to take into account the following nuances:
+Everything must be in English.
+#4. OUTPUT FORMAT
+Form the answer strictly according to these requirements:
+1) Print the task list in a txt file.
+2) You don't need to output anything extra except tasks.
+#5. EXAMPLES (FEW-SHOT)
+I need an answer similar to this example.:
+The example is missing.
+#6. RESTRICTIONS
+In the response, use:
+- Assignments, descriptions, etc. in the body must be written strictly in English.
+In the answer, DON'T use:
+- Water and general phrases.
